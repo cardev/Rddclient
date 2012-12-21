@@ -13,7 +13,7 @@ and adjust these settings:
                "test.homeip.net",
                "test.merseine.nu"
               ]
-
+              
   @@checkInterval = 300  # seconds                                                                                                                                                                                                                                                                                                                                                                
   @@logIpPath  = "/var/log/dyndns.log"
   
