@@ -56,7 +56,7 @@ class RddClient
   # Logging
   @@logIpPath  = "/var/log/dyndns.log"
   # Mail settings
-  @@toalias="Christian Arndt"
+  @@toalias="Me"
   @@subject="[DYNDNS]"
   @@from="server@example.com"
   @@to="me@example.com"
