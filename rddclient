@@ -1,0 +1,323 @@
+#!/usr/bin/env ruby
+# -*- coding: utf-8 -*-
+
+# Copyright 2012 Christian Arndt. All rights reserved.
+#
+# Redistribution and use  in source and binary forms,  with or without
+# modification, are  permitted provided that  the following conditions
+# are met:
+#
+# 1. Redistributions  of source code  must retain the  above copyright
+# notice, this list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright
+# notice, this list of conditions  and the following disclaimer in the
+# documentation and/or other materials provided with the distribution.
+#
+# THIS  SOFTWARE IS  PROVIDED BY  Christian  Arndt ``AS  IS'' AND  ANY
+# EXPRESS OR  IMPLIED WARRANTIES, INCLUDING,  BUT NOT LIMITED  TO, THE
+# IMPLIED WARRANTIES  OF MERCHANTABILITY AND FITNESS  FOR A PARTICULAR
+# PURPOSE  ARE  DISCLAIMED. IN  NO  EVENT  SHALL  Dominik Elsbroek  OR
+# CONTRIBUTORS  BE  LIABLE   FOR  ANY  DIRECT,  INDIRECT,  INCIDENTAL,
+# SPECIAL,  EXEMPLARY, OR  CONSEQUENTIAL DAMAGES  (INCLUDING,  BUT NOT
+# LIMITED  TO, PROCUREMENT OF  SUBSTITUTE GOODS  OR SERVICES;  LOSS OF
+# USE, DATA, OR PROFITS;  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY  THEORY OF LIABILITY, WHETHER IN  CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING  NEGLIGENCE OR OTHERWISE) ARISING IN  ANY WAY OUT
+# OF THE USE  OF THIS SOFTWARE, EVEN IF ADVISED  OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+# The   views  and   conclusions   contained  in   the  software   and
+# documentation are those of the authors and should not be interpreted
+# as representing  official policies, either expressed  or implied, of
+# <copyright holder>.
+
+require 'rubygems'
+require 'open-uri'
+require 'base64'
+require 'net/smtp'
+require 'date'
+require 'daemons'
+require 'colorize'
+
+class RddClient
+  
+  @@username="test"
+  @@password="test"
+  @@hostnames=[
+               "test.ath.cx",
+               "test.dnsalias.net",
+               "test.dnsalias.org",
+               "test.homeip.net",
+               "test.merseine.nu"
+              ]
+  
+  @@checkInterval = 300  # seconds
+  # Logging
+  @@logIpPath  = "/var/log/dyndns.log"
+  # Mail settings
+  @@toalias="Christian Arndt"
+  @@subject="[DYNDNS]"
+  @@from="server@example.com"
+  @@to="me@example.com"
+  
+  def initialize daemon = true
+    @countRound = 0
+    @goodBuf    = 0  
+    @nochgBuf   = 0
+    @ret        = ""
+    @curIp      = ""
+    @prevIp     = ""
+    @state      = ""
+    @statesMail = ""
+    @desc       = ""
+    @hostState  = {}
+    resetHostStates
+    resetStates
+    if daemon
+      puts "[*] Starting in background."
+      daemonize_app
+    else
+    puts "[*] Starting in foreground..."
+    end
+  end
+  
+  @@DESCS = {
+    "badsys"   => "The systemcode parameter given is not valid. valid system parameters are dyndns,statdns and custom.",
+    "badagent" => "The user agent that was sent has been blocked for not following these specifications or no user agent was specified.",
+    "badauth"  => "The username or password specified are incorrect.",
+    "!donator" => "An option available only to credited users (such as offline URL) was specified, but the user is not a credited user. If multiple hosts were specified, only a single !donator will be returned.",
+    "good"     => "The update was successful, and the hostname is now updated.",
+    "nochg"    => "The update changed no settings, and is considered abusive. Additional nochg updates will cause the hostname to become blocked.",
+    "notfqdn"  => "The hostname specified is not a fully-qualified domain name (not in the form host-name.dyndns.org or domain.com).",
+    "nohost"   => "The hostname specified does not exist (or is not in the service specified in the system parameter)",
+    "!yours"   => "The hostname specified exists, but not under the username specified.",
+    "numhost"  => "Too many or too few hosts found",
+    "abuse"    => "The hostname specified is blocked for update abuse.",
+    "dnserr"   => "DNS error encountered",
+    "911"      => "There is a serious problem on our side, such as a database or DNS server failure. The client should stop updating until notified via the status page that the service is back up."
+  }
+
+  def internet?
+    begin
+      true if open("http://checkip.dyndns.com")
+    rescue
+      false
+    end
+  end
+
+  def prevUpdated?
+    @prevIp.size > 0
+  end
+  
+  def detectIp
+    begin
+      @curIp = open("http://checkip.dyndns.com") do |f| 
+        /([0-9]{1,3}\.){3}[0-9]{1,3}/.match(f.read)[0] 
+      end
+    rescue Exception => e
+      puts e.message
+      return e.message
+    end
+    @curIp
+  end
+  
+  def ipDifferent?
+    ret = @prevIp != @curIp
+    if ret
+      puts "[*] IP differs. Old: #{@prevIp} New: #{@curIp}".yellow
+    end
+    ret
+  end
+  
+  def performUpdate host
+    begin
+      url = "http://members.dyndns.org/nic/update?system=dyndns&hostname=#{host}&myip=#{@curIp}&wildcard=OFF&backmx=NO&offline=NO"
+      @ret = open(url, 
+                  "User-Agent" => "ruby",
+                  "Authorization" => "Basic " << Base64.encode64("#{@@username}"+':'+"#{@@password}")
+                  )
+      sleep 5
+      puts "[*] Updating: " + "#{host}".yellow.concat(" #{(@ret.string.split' ').first}".green)
+    rescue Exception => e
+      puts e.message
+      @state = "error"
+      return @state
+    end
+    @state = (@ret.string.split' ').first
+    @descr = @@DESCS[(@ret.string.split" ").first]
+    @state
+  end
+  
+  def updateCurIp
+    @prevIp = @curIp
+    dynLog "Success: #{@state} " + " #{@descr}"
+    sendEmail("Success: #{@state} ", @descr)  
+    resetStates
+  end
+  
+  def processReturnCode
+    if (@state == "good")
+      return "good"
+    elsif (@state == "nochg")
+      return "nochg"
+    else
+      return "error"
+    end
+  end 
+  
+  def goodCount
+    (@hostState.select {|k,v| v == "good"}).size
+  end
+  
+  def nochgCount
+    (@hostState.select {|k,v| v == "nochg"}).size
+  end
+  
+  def resetHostStates
+    @@hostnames.each do |host|
+      @hostState[host] = nil
+    end
+    @countRound = 0
+  end
+  
+  def forceUpdateAll
+    while true
+      if internet?
+        @countRound = @countRound + 1
+        puts "[*] Round: #{@countRound}".white
+        @@hostnames.each do |host|
+          next if @hostState[host] == "good" or @hostState[host] == "nochg"
+          performUpdate host
+          ret = processReturnCode
+          states("#{host} : #{ret}")
+          if ret == "nochg" or ret == "good"
+            @hostState[host] = processReturnCode
+          end
+        end
+        if goodCount == @@hostnames.size or nochgCount+goodCount == @@hostnames.size
+          updateCurIp
+          resetHostStates
+          break
+        elsif nochgCount == @@hostnames.size
+          resetHostStates
+          break
+        end
+      else
+        puts "[*] Internet Connection lost...".red
+        break
+      end
+    end
+  end
+  
+  def start
+    unless File.exists? "#{@@logIpPath}"
+      puts "[*] No Logfile. Creating #{@@logIpPath}".green
+      File.new(@@logIpPath,  "w+")
+    end
+    loop do
+      if internet?
+        if prevUpdated?
+          detectIp
+          if ipDifferent?
+            forceUpdateAll
+          else
+            puts "[*] IP is still the same. Update not necessary".white
+            puts "[*] Going to sleep for #{@@checkInterval} seconds.".white
+            sleep @@checkInterval
+          end
+        else
+          puts "[*] Initial Start. Update for all Hostname is forced.".white
+          detectIp
+          forceUpdateAll
+          puts "[*] Going to sleep for #{@@checkInterval} seconds.".white
+          sleep @@checkInterval          
+        end
+      else
+        puts "[*] No Internet Connection. Going to sleep for #{@@checkInterval} seconds.".red
+        sleep @@checkInterval
+      end
+    end
+  end
+  
+  def dynLog txt
+    text = "#{Time.new.strftime("%b %d %H:%M:%S")}: " + txt + "\n"
+    File.open(@@logIpPath, 'a') { |f|  
+      f.write(text)
+      f.sync = true
+    }
+  end
+  
+  def states state
+    @statesMail << state + " \n" 
+  end
+  
+  def resetStates
+    @statesMail = ""
+  end
+  
+  #def notNecess
+  #  # 1.9 ruby: Class of return value of hash.keys is hash
+  #  # 1.8 ruby: Class of return value of hash.keys array
+  #  #((@@hostnames.select {|k,v| v == "nochg"}).keys).join(' & ')
+  #  names = ""
+  #  (@@hostnames.select {|k,v| v == "nochg"}).each do |k|
+  #    names << k[0] + " "
+  #  end
+  #  names
+  #end
+  
+  def sendEmail(state, descr)
+    msg = <<MESSAGE
+From: DYNDNS <#{@@from}>
+To: #{@@toalias} <#{@@to}>
+Subject: #{@@subject} #{state}
+
+The responscodes from dyndns.org were: 
+
+#{@statesMail}
+#{DateTime.now.ctime}
+
+#{descr}
+MESSAGE
+    
+    Net::SMTP.start('localhost') do |smtp|
+      smtp.send_message msg,  "#{@@from}", "#{@@to}"
+    end
+  end
+  
+  def daemonize_app
+    if RUBY_VERSION < "1.9"
+      exit if fork
+      Process.setsid
+      exit if fork
+      Dir.chdir "/" 
+      STDIN.reopen "/dev/null"
+      STDOUT.reopen "/dev/null", "a" 
+      STDERR.reopen "/dev/null", "a" 
+    else
+      Process.daemon
+    end 
+  end
+  
+end
+
+def help
+  puts <<START
+Start with following args:
+
+  -d daemon to run in background
+  -t terminal to run in foreground
+  -h to show this help text
+START
+end
+
+if ARGV[0] == "-d"
+  dns = RddClient.new true
+  dns.start
+elsif ARGV[0] == "-t"
+  dns = RddClient.new false
+  dns.start
+else
+  help
+end
