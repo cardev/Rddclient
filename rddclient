@@ -144,9 +144,9 @@ class RddClient
       @state = "error"
       return @state
     end
-    @state = (@ret.string.split' ').first
     @descr = @@DESCS[(@ret.string.split" ").first]
-    @state
+    @state = (@ret.string.split' ').first
+    return @state
   end
   
   def updateCurIp
@@ -155,16 +155,6 @@ class RddClient
     sendEmail("Success: #{@state} ", @descr)  
     resetStates
   end
-  
-  def processReturnCode
-    if (@state == "good")
-      return "good"
-    elsif (@state == "nochg")
-      return "nochg"
-    else
-      return "error"
-    end
-  end 
   
   def goodCount
     (@hostState.select {|k,v| v == "good"}).size
@@ -189,9 +179,8 @@ class RddClient
         @@hostnames.each do |host|
           next if @hostState[host] == "good" or @hostState[host] == "nochg"
           performUpdate host
-          ret = processReturnCode
-          states("#{host} : #{ret}")
-          if ret == "nochg" or ret == "good"
+          states("#{host} : #{@state}")
+          if @state == "nochg" or @state == "good"
             @hostState[host] = processReturnCode
           end
         end
