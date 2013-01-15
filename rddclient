@@ -181,7 +181,7 @@ class RddClient
           performUpdate host
           states("#{host} : #{@state}")
           if @state == "nochg" or @state == "good"
-            @hostState[host] = processReturnCode
+            @hostState[host] = @state
           end
         end
         if goodCount == @@hostnames.size or nochgCount+goodCount == @@hostnames.size
